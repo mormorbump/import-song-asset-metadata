@@ -1,6 +1,6 @@
 #!/bin/bash
 # build.sh
-
+rm -rf
 # Linux Intel 64-bit
 GOOS=linux GOARCH=amd64 go build -o dist/music-artwork-embedder-linux-amd64 main.go
 

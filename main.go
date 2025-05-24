@@ -321,7 +321,9 @@ func (p *MusicFileProcessor) getAudioFormat(musicFile string) (string, error) {
 	switch formatName {
 	case "mp3":
 		return "mp3", nil
-	case "mp4", "m4a":
+	case "mp4":
+		return "mp4", nil
+	case "mov,mp4,m4a,3gp,3g2,mj2": // M4Aファイルの場合
 		return "mp4", nil
 	case "flac":
 		return "flac", nil
@@ -333,7 +335,7 @@ func (p *MusicFileProcessor) getAudioFormat(musicFile string) (string, error) {
 		switch ext {
 		case ".mp3":
 			return "mp3", nil
-		case ".m4a":
+		case ".m4a", ".mp4":
 			return "mp4", nil
 		case ".flac":
 			return "flac", nil
@@ -355,25 +357,128 @@ func (p *MusicFileProcessor) embedArtworkForceReplace(musicFile, artworkFile, ou
 
 	fmt.Printf("    検出されたフォーマット: %s\n", format)
 
+	// フォーマット別の処理
+	switch format {
+	case "mp3":
+		return p.embedArtworkForceReplaceMP3(musicFile, artworkFile, outputFile)
+	case "mp4":
+		return p.embedArtworkForceReplaceMP4(musicFile, artworkFile, outputFile)
+	case "flac":
+		return p.embedArtworkForceReplaceFLAC(musicFile, artworkFile, outputFile)
+	default:
+		return p.embedArtworkForceReplaceGeneric(musicFile, artworkFile, outputFile, format)
+	}
+}
+
+// embedArtworkForceReplaceMP3 はMP3ファイルの既存アートワークを強制置換
+func (p *MusicFileProcessor) embedArtworkForceReplaceMP3(musicFile, artworkFile, outputFile string) error {
 	cmd := exec.Command("ffmpeg",
 		"-i", musicFile,
 		"-i", artworkFile,
-		"-map", "0:a", // 音声ストリームのみをマップ（既存の画像ストリームを除外）
-		"-map", "1:0", // 新しい画像をマップ
+		"-map", "0:a", // 音声ストリームのみ
+		"-map", "1:0", // 新しい画像
 		"-c:a", "copy", // 音声はコピー
-		"-c:v", "copy", // 画像もコピー（再エンコードしない）
-		"-disposition:v:0", "attached_pic", // 画像を attached_pic として設定
-		"-f", format, // 検出されたフォーマットを使用
+		"-c:v", "mjpeg", // 画像はmjpegでエンコード
 		"-id3v2_version", "3",
-		"-metadata:s:v:0", "title=Album cover",
-		"-metadata:s:v:0", `comment=Cover (front)`,
-		"-y", // 既存ファイルを上書き
+		"-metadata:s:v", "title=Album cover",
+		"-metadata:s:v", `comment=Cover (front)`,
+		"-y",
 		outputFile,
 	)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("ffmpegエラー: %w\n出力: %s", err, string(output))
+		return fmt.Errorf("MP3強制置換エラー: %w\n出力: %s", err, string(output))
+	}
+
+	return nil
+}
+
+// embedArtworkForceReplaceMP4 はMP4/M4Aファイルの既存アートワークを強制置換
+func (p *MusicFileProcessor) embedArtworkForceReplaceMP4(musicFile, artworkFile, outputFile string) error {
+	cmd := exec.Command("ffmpeg",
+		"-i", musicFile,
+		"-i", artworkFile,
+		"-map", "0:a", // 音声ストリームのみ（既存画像を除外）
+		"-map", "1:0", // 新しい画像
+		"-c:a", "copy", // 音声はコピー
+		"-c:v", "png", // M4Aの場合、PNGまたはJPEGが推奨
+		"-disposition:v:0", "attached_pic",
+		"-tag:v:0", "hvc1", // M4A用の画像タグ
+		"-f", "mp4",
+		"-movflags", "+faststart", // M4A最適化
+		"-y",
+		outputFile,
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// PNGで失敗した場合、JPEGで再試行
+		fmt.Printf("    PNG強制置換失敗、JPEGで再試行中...\n")
+		cmd = exec.Command("ffmpeg",
+			"-i", musicFile,
+			"-i", artworkFile,
+			"-map", "0:a",
+			"-map", "1:0",
+			"-c:a", "copy",
+			"-c:v", "mjpeg", // JPEG形式
+			"-disposition:v:0", "attached_pic",
+			"-f", "mp4",
+			"-movflags", "+faststart",
+			"-y",
+			outputFile,
+		)
+
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("M4A強制置換エラー: %w\n出力: %s", err, string(output))
+		}
+	}
+
+	return nil
+}
+
+// embedArtworkForceReplaceFLAC はFLACファイルの既存アートワークを強制置換
+func (p *MusicFileProcessor) embedArtworkForceReplaceFLAC(musicFile, artworkFile, outputFile string) error {
+	cmd := exec.Command("ffmpeg",
+		"-i", musicFile,
+		"-i", artworkFile,
+		"-map", "0:a",
+		"-map", "1:0",
+		"-c:a", "copy",
+		"-c:v", "copy",
+		"-disposition:v:0", "attached_pic",
+		"-f", "flac",
+		"-y",
+		outputFile,
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("FLAC強制置換エラー: %w\n出力: %s", err, string(output))
+	}
+
+	return nil
+}
+
+// embedArtworkForceReplaceGeneric は汎用の既存アートワーク強制置換
+func (p *MusicFileProcessor) embedArtworkForceReplaceGeneric(musicFile, artworkFile, outputFile, format string) error {
+	cmd := exec.Command("ffmpeg",
+		"-i", musicFile,
+		"-i", artworkFile,
+		"-map", "0:a",
+		"-map", "1:0",
+		"-c:a", "copy",
+		"-c:v", "copy",
+		"-disposition:v:0", "attached_pic",
+		"-f", format,
+		"-y",
+		outputFile,
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("汎用強制置換エラー: %w\n出力: %s", err, string(output))
 	}
 
 	return nil
@@ -389,25 +494,133 @@ func (p *MusicFileProcessor) embedArtwork(musicFile, artworkFile, outputFile str
 
 	fmt.Printf("    検出されたフォーマット: %s\n", format)
 
+	// フォーマット別の処理
+	switch format {
+	case "mp3":
+		return p.embedArtworkMP3(musicFile, artworkFile, outputFile)
+	case "mp4":
+		return p.embedArtworkMP4(musicFile, artworkFile, outputFile)
+	case "flac":
+		return p.embedArtworkFLAC(musicFile, artworkFile, outputFile)
+	default:
+		return p.embedArtworkGeneric(musicFile, artworkFile, outputFile, format)
+	}
+}
+
+// embedArtworkMP3 はMP3ファイル専用の画像埋め込み
+func (p *MusicFileProcessor) embedArtworkMP3(musicFile, artworkFile, outputFile string) error {
 	cmd := exec.Command("ffmpeg",
 		"-i", musicFile,
 		"-i", artworkFile,
-		"-map", "0:a", // 音声ストリームを明示的にマップ
-		"-map", "1:0", // 新しい画像をマップ
+		"-map", "0:0", // 音声ストリーム
+		"-map", "1:0", // 画像ストリーム
 		"-c:a", "copy", // 音声はコピー
-		"-c:v", "copy", // 画像もコピー
-		"-disposition:v:0", "attached_pic", // 画像をattached_picとして設定
-		"-f", format, // 検出されたフォーマットを使用
+		"-c:v", "mjpeg", // 画像はmjpegとしてエンコード
 		"-id3v2_version", "3",
-		"-metadata:s:v:0", "title=Album cover",
-		"-metadata:s:v:0", `comment=Cover (front)`,
-		"-y", // 既存ファイルを上書き
+		"-metadata:s:v", "title=Album cover",
+		"-metadata:s:v", `comment=Cover (front)`,
+		"-y",
 		outputFile,
 	)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("ffmpegエラー: %w\n出力: %s", err, string(output))
+		return fmt.Errorf("MP3埋め込みエラー: %w\n出力: %s", err, string(output))
+	}
+
+	return nil
+}
+
+// embedArtworkMP4 はMP4/M4Aファイル専用の画像埋め込み（音声ファイルのみ）
+func (p *MusicFileProcessor) embedArtworkMP4(musicFile, artworkFile, outputFile string) error {
+	// まず標準的な方法を試行
+	cmd := exec.Command("ffmpeg",
+		"-i", musicFile,
+		"-i", artworkFile,
+		"-map", "0:a", // 音声ストリーム
+		"-map", "1:0", // 画像ストリーム
+		"-c:a", "copy", // 音声はコピー
+		"-c:v", "copy", // 画像もコピー（再エンコードなし）
+		"-disposition:v:0", "attached_pic",
+		"-metadata:s:v:0", "title=Album cover",
+		"-metadata:s:v:0", `comment=Cover (front)`,
+		"-f", "mp4",
+		"-movflags", "+faststart",
+		"-y",
+		outputFile,
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// 標準方法で失敗した場合、AtomicParsleyを使用する方法に切り替え
+		fmt.Printf("    標準埋め込み失敗、代替方法で再試行中...\n")
+
+		// 一時的に音声のみのファイルを作成
+		tempAudioPath := outputFile + ".temp.m4a"
+		cmd = exec.Command("ffmpeg",
+			"-i", musicFile,
+			"-map", "0:a",
+			"-c:a", "copy",
+			"-f", "mp4",
+			"-y",
+			tempAudioPath,
+		)
+
+		if _, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("音声抽出エラー: %w", err)
+		}
+		defer os.Remove(tempAudioPath)
+
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("M4A画像埋め込みエラー（全手法失敗）: %w\n出力: %s", err, string(output))
+		}
+	}
+
+	return nil
+}
+
+// embedArtworkFLAC はFLACファイル専用の画像埋め込み
+func (p *MusicFileProcessor) embedArtworkFLAC(musicFile, artworkFile, outputFile string) error {
+	cmd := exec.Command("ffmpeg",
+		"-i", musicFile,
+		"-i", artworkFile,
+		"-map", "0:a",
+		"-map", "1:0",
+		"-c:a", "copy",
+		"-c:v", "copy",
+		"-disposition:v:0", "attached_pic",
+		"-f", "flac",
+		"-y",
+		outputFile,
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("FLAC埋め込みエラー: %w\n出力: %s", err, string(output))
+	}
+
+	return nil
+}
+
+// embedArtworkGeneric は汎用の画像埋め込み
+func (p *MusicFileProcessor) embedArtworkGeneric(musicFile, artworkFile, outputFile, format string) error {
+	cmd := exec.Command("ffmpeg",
+		"-i", musicFile,
+		"-i", artworkFile,
+		"-map", "0:a",
+		"-map", "1:0",
+		"-c:a", "copy",
+		"-c:v", "copy",
+		"-disposition:v:0", "attached_pic",
+		"-f", format,
+		"-y",
+		outputFile,
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("汎用埋め込みエラー: %w\n出力: %s", err, string(output))
 	}
 
 	return nil
@@ -416,6 +629,18 @@ func (p *MusicFileProcessor) embedArtwork(musicFile, artworkFile, outputFile str
 // processFile は単一の音楽ファイルを処理
 func (p *MusicFileProcessor) processFile(filePath string) error {
 	fmt.Printf("処理中: %s\n", filePath)
+
+	// 元ファイルのバックアップを作成
+	backupPath := filePath + ".backup"
+	if err := p.createBackup(filePath, backupPath); err != nil {
+		return fmt.Errorf("バックアップ作成エラー: %w", err)
+	}
+	defer func() {
+		// 処理完了後、バックアップを削除（成功時のみ）
+		if _, err := os.Stat(backupPath); err == nil {
+			os.Remove(backupPath)
+		}
+	}()
 
 	// 既存のアートワークをチェック
 	hasArtwork, err := p.hasExistingArtwork(filePath)
@@ -490,22 +715,84 @@ func (p *MusicFileProcessor) processFile(filePath string) error {
 	if hasArtwork && p.config.ForceOverwrite {
 		fmt.Println("  既存アートワークを置き換え中...")
 		if err := p.embedArtworkForceReplace(filePath, tempImagePath, tempOutputPath); err != nil {
+			// 失敗した場合、バックアップから復元
+			p.restoreFromBackup(backupPath, filePath)
 			return fmt.Errorf("アートワーク埋め込みエラー: %w", err)
 		}
 	} else {
 		fmt.Println("  アートワークを埋め込み中...")
 		if err := p.embedArtwork(filePath, tempImagePath, tempOutputPath); err != nil {
+			// 失敗した場合、バックアップから復元
+			p.restoreFromBackup(backupPath, filePath)
 			return fmt.Errorf("アートワーク埋め込みエラー: %w", err)
 		}
+	}
+
+	// 一時ファイルの整合性をチェック
+	if err := p.validateAudioFile(tempOutputPath); err != nil {
+		os.Remove(tempOutputPath) // 破損ファイルを削除
+		p.restoreFromBackup(backupPath, filePath)
+		return fmt.Errorf("出力ファイル検証エラー: %w", err)
 	}
 
 	// 元ファイルを一時ファイルで置き換え
 	if err := os.Rename(tempOutputPath, filePath); err != nil {
 		os.Remove(tempOutputPath) // クリーンアップ
+		p.restoreFromBackup(backupPath, filePath)
 		return fmt.Errorf("ファイル置き換えエラー: %w", err)
 	}
 
 	fmt.Printf("  完了: %s\n\n", filePath)
+	return nil
+}
+
+// createBackup はファイルのバックアップを作成
+func (p *MusicFileProcessor) createBackup(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, sourceFile)
+	return err
+}
+
+// restoreFromBackup はバックアップからファイルを復元
+func (p *MusicFileProcessor) restoreFromBackup(backupPath, originalPath string) error {
+	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
+		return fmt.Errorf("バックアップファイルが存在しません")
+	}
+
+	fmt.Printf("  エラー検出: バックアップから復元中...\n")
+	return os.Rename(backupPath, originalPath)
+}
+
+// validateAudioFile は音声ファイルの整合性をチェック
+func (p *MusicFileProcessor) validateAudioFile(filePath string) error {
+	cmd := exec.Command("ffprobe",
+		"-v", "error",
+		"-show_entries", "format=duration",
+		"-of", "csv=p=0",
+		filePath,
+	)
+
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("ファイル検証失敗: %w", err)
+	}
+
+	// 出力が空でないことを確認
+	if len(strings.TrimSpace(string(output))) == 0 {
+		return fmt.Errorf("ファイルが破損しています（duration取得不可）")
+	}
+
 	return nil
 }
 
