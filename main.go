@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -80,6 +81,41 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// extractTitleFromFilename はファイル名から曲名を抽出
+func (p *MusicFileProcessor) extractTitleFromFilename(filePath string) string {
+	// ファイル名のみを取得（パスを除く）
+	filename := filepath.Base(filePath)
+
+	// 拡張子を除去
+	titleWithoutExt := strings.TrimSuffix(filename, filepath.Ext(filename))
+
+	// 先頭の番号パターンを除去
+	// パターン例: "01 ", "01. ", "1 ", "1. ", "01_", "01-"
+	patterns := []string{
+		`^\d{1,3}[\s\.\-_]+`, // 1-3桁の数字 + 区切り文字
+		`^\d{1,3}`,           // 1-3桁の数字のみ（区切り文字なし）
+	}
+
+	cleanTitle := titleWithoutExt
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		if re.MatchString(cleanTitle) {
+			cleanTitle = re.ReplaceAllString(cleanTitle, "")
+			break // 最初にマッチしたパターンのみ適用
+		}
+	}
+
+	// 前後の空白を削除
+	cleanTitle = strings.TrimSpace(cleanTitle)
+
+	// アンダースコアをスペースに変換（オプション）
+	cleanTitle = strings.ReplaceAll(cleanTitle, "_", " ")
+
+	fmt.Printf("    ファイル名から抽出: '%s' -> '%s'\n", titleWithoutExt, cleanTitle)
+
+	return cleanTitle
 }
 
 // MusicFileProcessor は音楽ファイルの処理を行う構造体
@@ -401,14 +437,35 @@ func (p *MusicFileProcessor) processFile(filePath string) error {
 	fmt.Printf("  アルバム: %s\n", album)
 	fmt.Printf("  タイトル: %s\n", title)
 
-	if artist == "" && title == "" {
-		fmt.Printf("  警告: アーティストまたは曲名情報が不足しています。スキップします。\n\n")
+	// 検索に使用する情報を決定
+	searchArtist := artist
+	searchTitle := title
+
+	// アーティスト情報が不足している場合のフォールバック
+	if artist == "" {
+		searchArtist = "Unknown Artist"
+		fmt.Printf("  警告: アーティスト情報がありません。'Unknown Artist' で検索します。\n")
+	}
+
+	// タイトル情報が不足している場合、ファイル名から抽出
+	if title == "" {
+		searchTitle = p.extractTitleFromFilename(filePath)
+		if searchTitle == "" {
+			fmt.Printf("  警告: タイトル情報とファイル名から曲名を抽出できませんでした。スキップします。\n\n")
+			return nil
+		}
+		fmt.Printf("  ファイル名から抽出した曲名で検索: %s\n", searchTitle)
+	}
+
+	// 最低限の情報（アーティストまたはタイトル）があるかチェック
+	if searchTitle == "" {
+		fmt.Printf("  警告: 検索に必要な情報が不足しています。スキップします。\n\n")
 		return nil
 	}
 
 	// アートワークを検索
 	fmt.Println("  アートワークを検索中...")
-	artworkURL, err := p.searchArtwork(artist, title)
+	artworkURL, err := p.searchArtwork(searchArtist, searchTitle)
 	if err != nil {
 		fmt.Printf("  警告: アートワーク検索に失敗しました (%v)。スキップします。\n\n", err)
 		return nil
