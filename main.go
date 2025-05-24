@@ -1,10 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
+	"github.com/joho/godotenv"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,31 +19,81 @@ import (
 
 // SpotifySearchResponse はSpotify検索APIのレスポンス構造体
 type SpotifySearchResponse struct {
-	Albums struct {
+	Tracks struct {
 		Items []struct {
-			Name   string `json:"name"`
-			Images []struct {
-				URL    string `json:"url"`
-				Height int    `json:"height"`
-				Width  int    `json:"width"`
-			} `json:"images"`
+			Name  string `json:"name"`
+			Album struct {
+				Name   string `json:"name"`
+				Images []struct {
+					URL    string `json:"url"`
+					Height int    `json:"height"`
+					Width  int    `json:"width"`
+				} `json:"images"`
+			} `json:"album"`
 			Artists []struct {
 				Name string `json:"name"`
 			} `json:"artists"`
 		} `json:"items"`
-	} `json:"albums"`
+	} `json:"tracks"`
+}
+
+// Config はアプリケーションの設定を管理
+type Config struct {
+	ForceOverwrite bool
+}
+
+// parseArgs はコマンドライン引数を解析
+func parseArgs() (inputPath string, config *Config, err error) {
+	config = &Config{}
+
+	if len(os.Args) < 2 {
+		return "", nil, fmt.Errorf("insufficient arguments")
+	}
+
+	args := os.Args[1:]
+	var inputFound bool
+
+	for _, arg := range args {
+		switch arg {
+		case "--force", "-f":
+			config.ForceOverwrite = true
+		case "--help", "-h":
+			return "", nil, fmt.Errorf("help requested")
+		default:
+			if !inputFound && !strings.HasPrefix(arg, "-") {
+				inputPath = arg
+				inputFound = true
+			}
+		}
+	}
+
+	if !inputFound {
+		return "", nil, fmt.Errorf("no input path specified")
+	}
+
+	return inputPath, config, nil
+}
+
+// min は2つの整数の最小値を返す
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // MusicFileProcessor は音楽ファイルの処理を行う構造体
 type MusicFileProcessor struct {
 	spotifyToken string
 	client       *http.Client
+	config       *Config
 }
 
 // NewMusicFileProcessor は新しいプロセッサーを作成
-func NewMusicFileProcessor() *MusicFileProcessor {
+func NewMusicFileProcessor(config *Config) *MusicFileProcessor {
 	return &MusicFileProcessor{
 		client: &http.Client{Timeout: 30 * time.Second},
+		config: config,
 	}
 }
 
@@ -94,46 +145,84 @@ func (p *MusicFileProcessor) getSpotifyToken(clientID, clientSecret string) erro
 	return nil
 }
 
-// searchArtwork はSpotify APIを使用してアートワークを検索
-func (p *MusicFileProcessor) searchArtwork(artist, album string) (string, error) {
-	if p.spotifyToken == "" {
-		return "", fmt.Errorf("Spotifyトークンが設定されていません")
-	}
+// searchArtwork はSpotify APIを使用してアートワークを検索（曲検索ベース）
+func (p *MusicFileProcessor) searchArtwork(artist, title string) (string, error) {
+	fmt.Printf("Debug: アートワーク検索開始\n")
+	fmt.Printf("Debug: アーティスト: '%s'\n", artist)
+	fmt.Printf("Debug: 曲名: '%s'\n", title)
 
-	query := fmt.Sprintf("artist:%s album:%s", artist, album)
+	// 曲名とアーティスト名で検索
+	query := fmt.Sprintf("track:%s artist:%s", title, artist)
 	encodedQuery := url.QueryEscape(query)
 
-	searchURL := fmt.Sprintf("https://api.spotify.com/v1/search?q=%s&type=album&limit=1", encodedQuery)
+	fmt.Printf("Debug: 検索クエリ: '%s'\n", query)
+	fmt.Printf("Debug: エンコード済みクエリ: '%s'\n", encodedQuery)
+
+	searchURL := fmt.Sprintf("https://api.spotify.com/v1/search?q=%s&type=track&limit=1", encodedQuery)
+	fmt.Printf("Debug: 検索URL: %s\n", searchURL)
 
 	req, err := http.NewRequest("GET", searchURL, nil)
 	if err != nil {
+		fmt.Printf("Debug: リクエスト作成エラー: %v\n", err)
 		return "", err
 	}
 
 	req.Header.Add("Authorization", "Bearer "+p.spotifyToken)
+	fmt.Printf("Debug: 認証ヘッダー設定完了 (トークン長: %d文字)\n", len(p.spotifyToken))
 
+	fmt.Printf("Debug: Spotify検索APIにリクエスト送信中...\n")
 	resp, err := p.client.Do(req)
 	if err != nil {
+		fmt.Printf("Debug: HTTPリクエストエラー: %v\n", err)
 		return "", err
 	}
 	defer resp.Body.Close()
 
-	var searchResp SpotifySearchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
+	fmt.Printf("Debug: 検索レスポンスステータス: %d\n", resp.StatusCode)
+
+	// レスポンスボディを読み取り
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("Debug: レスポンス読み取りエラー: %v\n", err)
 		return "", err
 	}
 
-	if len(searchResp.Albums.Items) == 0 || len(searchResp.Albums.Items[0].Images) == 0 {
+	fmt.Printf("Debug: 検索レスポンスボディ: %s\n", string(body))
+
+	var searchResp SpotifySearchResponse
+	if err := json.Unmarshal(body, &searchResp); err != nil {
+		fmt.Printf("Debug: JSON解析エラー: %v\n", err)
+		return "", err
+	}
+
+	fmt.Printf("Debug: 検索結果楽曲数: %d\n", len(searchResp.Tracks.Items))
+
+	if len(searchResp.Tracks.Items) == 0 {
+		fmt.Printf("Debug: 楽曲が見つかりませんでした\n")
+		return "", fmt.Errorf("アートワークが見つかりませんでした")
+	}
+
+	firstTrack := searchResp.Tracks.Items[0]
+	fmt.Printf("Debug: 見つかった楽曲: '%s'\n", firstTrack.Name)
+	fmt.Printf("Debug: 楽曲のアーティスト: %v\n", firstTrack.Artists)
+	fmt.Printf("Debug: アルバム名: '%s'\n", firstTrack.Album.Name)
+	fmt.Printf("Debug: 画像数: %d\n", len(firstTrack.Album.Images))
+
+	if len(firstTrack.Album.Images) == 0 {
+		fmt.Printf("Debug: アルバムに画像がありません\n")
 		return "", fmt.Errorf("アートワークが見つかりませんでした")
 	}
 
 	// 最高解像度の画像を選択
-	bestImage := searchResp.Albums.Items[0].Images[0]
-	for _, img := range searchResp.Albums.Items[0].Images {
+	bestImage := firstTrack.Album.Images[0]
+	for i, img := range firstTrack.Album.Images {
+		fmt.Printf("Debug: 画像%d - URL: %s, サイズ: %dx%d\n", i, img.URL, img.Width, img.Height)
 		if img.Height > bestImage.Height {
 			bestImage = img
 		}
 	}
+
+	fmt.Printf("Debug: 選択された画像: %s (%dx%d)\n", bestImage.URL, bestImage.Width, bestImage.Height)
 
 	return bestImage.URL, nil
 }
@@ -160,14 +249,117 @@ func (p *MusicFileProcessor) downloadImage(imageURL, outputPath string) error {
 	return err
 }
 
+// getAudioFormat は音楽ファイルのフォーマットを取得
+func (p *MusicFileProcessor) getAudioFormat(musicFile string) (string, error) {
+	cmd := exec.Command("ffprobe",
+		"-v", "quiet",
+		"-print_format", "json",
+		"-show_format",
+		musicFile,
+	)
+
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+
+	var probeResult struct {
+		Format struct {
+			FormatName string `json:"format_name"`
+		} `json:"format"`
+	}
+
+	if err := json.Unmarshal(output, &probeResult); err != nil {
+		return "", err
+	}
+
+	// フォーマット名から適切な出力フォーマットを決定
+	formatName := probeResult.Format.FormatName
+
+	// 複数のフォーマットが含まれている場合（例: "mp3,mp2,mp1"）、最初のものを使用
+	if strings.Contains(formatName, ",") {
+		formatName = strings.Split(formatName, ",")[0]
+	}
+
+	// ffmpegで使用する出力フォーマット名にマッピング
+	switch formatName {
+	case "mp3":
+		return "mp3", nil
+	case "mp4", "m4a":
+		return "mp4", nil
+	case "flac":
+		return "flac", nil
+	case "wav":
+		return "wav", nil
+	default:
+		// デフォルトはファイル拡張子から推定
+		ext := strings.ToLower(filepath.Ext(musicFile))
+		switch ext {
+		case ".mp3":
+			return "mp3", nil
+		case ".m4a":
+			return "mp4", nil
+		case ".flac":
+			return "flac", nil
+		case ".wav":
+			return "wav", nil
+		default:
+			return "mp3", nil // フォールバック
+		}
+	}
+}
+
+// embedArtworkForceReplace は既存アートワークを強制置換
+func (p *MusicFileProcessor) embedArtworkForceReplace(musicFile, artworkFile, outputFile string) error {
+	// 入力ファイルのフォーマットを取得
+	format, err := p.getAudioFormat(musicFile)
+	if err != nil {
+		return fmt.Errorf("フォーマット取得エラー: %w", err)
+	}
+
+	fmt.Printf("    検出されたフォーマット: %s\n", format)
+
+	cmd := exec.Command("ffmpeg",
+		"-i", musicFile,
+		"-i", artworkFile,
+		"-map", "0:a", // 音声ストリームのみをマップ（既存の画像ストリームを除外）
+		"-map", "1:0", // 新しい画像をマップ
+		"-c:a", "copy", // 音声はコピー
+		"-c:v", "copy", // 画像もコピー（再エンコードしない）
+		"-disposition:v:0", "attached_pic", // 画像を attached_pic として設定
+		"-f", format, // 検出されたフォーマットを使用
+		"-id3v2_version", "3",
+		"-metadata:s:v:0", "title=Album cover",
+		"-metadata:s:v:0", `comment=Cover (front)`,
+		"-y", // 既存ファイルを上書き
+		outputFile,
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffmpegエラー: %w\n出力: %s", err, string(output))
+	}
+
+	return nil
+}
+
 // embedArtwork はffmpegを使用してアートワークを埋め込み
 func (p *MusicFileProcessor) embedArtwork(musicFile, artworkFile, outputFile string) error {
+	// 入力ファイルのフォーマットを取得
+	format, err := p.getAudioFormat(musicFile)
+	if err != nil {
+		return fmt.Errorf("フォーマット取得エラー: %w", err)
+	}
+
+	fmt.Printf("    検出されたフォーマット: %s\n", format)
+
 	cmd := exec.Command("ffmpeg",
 		"-i", musicFile,
 		"-i", artworkFile,
 		"-map", "0:0",
 		"-map", "1:0",
 		"-c", "copy",
+		"-f", format, // 検出されたフォーマットを使用
 		"-id3v2_version", "3",
 		"-metadata:s:v", "title=Album cover",
 		"-metadata:s:v", `comment=Cover (front)`,
@@ -187,6 +379,18 @@ func (p *MusicFileProcessor) embedArtwork(musicFile, artworkFile, outputFile str
 func (p *MusicFileProcessor) processFile(filePath string) error {
 	fmt.Printf("処理中: %s\n", filePath)
 
+	// 既存のアートワークをチェック
+	hasArtwork, err := p.hasExistingArtwork(filePath)
+	if err != nil {
+		fmt.Printf("  警告: アートワーク確認に失敗しました (%v)。処理を続行します。\n", err)
+	} else if hasArtwork && !p.config.ForceOverwrite {
+		fmt.Printf("  既存のアートワークが検出されました。スキップします。\n")
+		fmt.Printf("  強制上書きする場合は --force または -f オプションを使用してください。\n\n")
+		return nil
+	} else if hasArtwork && p.config.ForceOverwrite {
+		fmt.Printf("  既存のアートワークが検出されましたが、強制上書きモードで処理を続行します。\n")
+	}
+
 	// メタデータを抽出
 	artist, album, title, err := p.extractMetadata(filePath)
 	if err != nil {
@@ -197,14 +401,14 @@ func (p *MusicFileProcessor) processFile(filePath string) error {
 	fmt.Printf("  アルバム: %s\n", album)
 	fmt.Printf("  タイトル: %s\n", title)
 
-	if artist == "" && album == "" {
-		fmt.Printf("  警告: アーティストまたはアルバム情報が不足しています。スキップします。\n\n")
+	if artist == "" && title == "" {
+		fmt.Printf("  警告: アーティストまたは曲名情報が不足しています。スキップします。\n\n")
 		return nil
 	}
 
 	// アートワークを検索
 	fmt.Println("  アートワークを検索中...")
-	artworkURL, err := p.searchArtwork(artist, album)
+	artworkURL, err := p.searchArtwork(artist, title)
 	if err != nil {
 		fmt.Printf("  警告: アートワーク検索に失敗しました (%v)。スキップします。\n\n", err)
 		return nil
@@ -224,9 +428,16 @@ func (p *MusicFileProcessor) processFile(filePath string) error {
 	tempOutputPath := filePath + ".tmp"
 
 	// アートワークを埋め込み
-	fmt.Println("  アートワークを埋め込み中...")
-	if err := p.embedArtwork(filePath, tempImagePath, tempOutputPath); err != nil {
-		return fmt.Errorf("アートワーク埋め込みエラー: %w", err)
+	if hasArtwork && p.config.ForceOverwrite {
+		fmt.Println("  既存アートワークを置き換え中...")
+		if err := p.embedArtworkForceReplace(filePath, tempImagePath, tempOutputPath); err != nil {
+			return fmt.Errorf("アートワーク埋め込みエラー: %w", err)
+		}
+	} else {
+		fmt.Println("  アートワークを埋め込み中...")
+		if err := p.embedArtwork(filePath, tempImagePath, tempOutputPath); err != nil {
+			return fmt.Errorf("アートワーク埋め込みエラー: %w", err)
+		}
 	}
 
 	// 元ファイルを一時ファイルで置き換え
@@ -270,15 +481,78 @@ func (p *MusicFileProcessor) processDirectory(dirPath string) error {
 	})
 }
 
+// hasExistingArtwork は音楽ファイルに既存のアートワークがあるかチェック
+func (p *MusicFileProcessor) hasExistingArtwork(musicFile string) (bool, error) {
+	cmd := exec.Command("ffprobe",
+		"-v", "quiet",
+		"-print_format", "json",
+		"-show_streams",
+		musicFile,
+	)
+
+	output, err := cmd.Output()
+	if err != nil {
+		return false, err
+	}
+
+	var probeResult struct {
+		Streams []struct {
+			CodecType   string `json:"codec_type"`
+			CodecName   string `json:"codec_name"`
+			Disposition struct {
+				AttachedPic int `json:"attached_pic"`
+			} `json:"disposition"`
+		} `json:"streams"`
+	}
+
+	if err := json.Unmarshal(output, &probeResult); err != nil {
+		return false, err
+	}
+
+	// ビデオストリームでattached_picがあるかチェック
+	for _, stream := range probeResult.Streams {
+		if stream.CodecType == "video" && stream.Disposition.AttachedPic == 1 {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("使用法:")
-		fmt.Println("  音楽ファイル処理: go run main.go <音楽ファイルまたはディレクトリパス>")
-		fmt.Println("  Spotify認証設定: SPOTIFY_CLIENT_ID と SPOTIFY_CLIENT_SECRET 環境変数を設定してください")
+	inputPath, config, err := parseArgs()
+	if err != nil {
+		if err.Error() == "help requested" {
+			fmt.Println("使用法:")
+			fmt.Println("  音楽ファイル処理: go run main.go [オプション] <音楽ファイルまたはディレクトリパス>")
+			fmt.Println("")
+			fmt.Println("オプション:")
+			fmt.Println("  -f, --force    既存のアートワークを強制的に上書きする")
+			fmt.Println("  -h, --help     このヘルプを表示する")
+			fmt.Println("")
+			fmt.Println("環境変数:")
+			fmt.Println("  SPOTIFY_CLIENT_ID     Spotify API Client ID")
+			fmt.Println("  SPOTIFY_CLIENT_SECRET Spotify API Client Secret")
+			fmt.Println("")
+			fmt.Println("例:")
+			fmt.Println("  go run main.go music.mp3                    # 単一ファイルを処理")
+			fmt.Println("  go run main.go /path/to/music/directory     # ディレクトリを処理")
+			fmt.Println("  go run main.go -f music.mp3                 # 既存アートワークを強制上書き")
+			os.Exit(0)
+		}
+		fmt.Println("エラー:", err)
+		fmt.Println("使用法: go run main.go [オプション] <音楽ファイルまたはディレクトリパス>")
+		fmt.Println("詳細は --help を参照してください")
 		os.Exit(1)
 	}
 
-	processor := NewMusicFileProcessor()
+	processor := NewMusicFileProcessor(config)
+
+	// .envファイルを読み込み
+	err = godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
 
 	// Spotify認証情報を取得
 	clientID := os.Getenv("SPOTIFY_CLIENT_ID")
@@ -287,17 +561,6 @@ func main() {
 	if clientID == "" || clientSecret == "" {
 		fmt.Println("警告: Spotify認証情報が設定されていません")
 		fmt.Println("SPOTIFY_CLIENT_ID と SPOTIFY_CLIENT_SECRET 環境変数を設定してください")
-		fmt.Println("Spotifyの代わりに他の方法を使用しますか？ (y/N)")
-
-		reader := bufio.NewReader(os.Stdin)
-		response, _ := reader.ReadString('\n')
-		response = strings.TrimSpace(strings.ToLower(response))
-
-		if response != "y" && response != "yes" {
-			os.Exit(1)
-		}
-
-		fmt.Println("注意: 現在のバージョンではSpotify APIのみサポートしています")
 		os.Exit(1)
 	}
 
@@ -308,13 +571,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	inputPath := os.Args[1]
-
 	// ffmpegがインストールされているかチェック
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		fmt.Println("エラー: ffmpegがインストールされていません")
 		fmt.Println("ffmpegをインストールしてから再実行してください")
 		os.Exit(1)
+	}
+
+	// ffprobeがインストールされているかチェック
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		fmt.Println("エラー: ffprobeがインストールされていません")
+		fmt.Println("ffprobe（ffmpegパッケージに含まれる）をインストールしてから再実行してください")
+		os.Exit(1)
+	}
+
+	// 強制上書きモードの表示
+	if config.ForceOverwrite {
+		fmt.Println("強制上書きモード: 既存のアートワークを置き換えます")
 	}
 
 	// ファイルまたはディレクトリの処理
