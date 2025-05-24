@@ -392,13 +392,15 @@ func (p *MusicFileProcessor) embedArtwork(musicFile, artworkFile, outputFile str
 	cmd := exec.Command("ffmpeg",
 		"-i", musicFile,
 		"-i", artworkFile,
-		"-map", "0:0",
-		"-map", "1:0",
-		"-c", "copy",
+		"-map", "0:a", // 音声ストリームを明示的にマップ
+		"-map", "1:0", // 新しい画像をマップ
+		"-c:a", "copy", // 音声はコピー
+		"-c:v", "copy", // 画像もコピー
+		"-disposition:v:0", "attached_pic", // 画像をattached_picとして設定
 		"-f", format, // 検出されたフォーマットを使用
 		"-id3v2_version", "3",
-		"-metadata:s:v", "title=Album cover",
-		"-metadata:s:v", `comment=Cover (front)`,
+		"-metadata:s:v:0", "title=Album cover",
+		"-metadata:s:v:0", `comment=Cover (front)`,
 		"-y", // 既存ファイルを上書き
 		outputFile,
 	)
