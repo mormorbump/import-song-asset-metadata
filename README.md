@@ -2,6 +2,9 @@
 
 Spotify APIを使用して音楽ファイルに自動でアルバムアートワークを埋め込むGoアプリケーションです。
 
+ffmpegコマンドはこちらを参考
+https://pianoforte32.com/using-ffmpeg-to-do-meta-tag-including-artwork-in-audio-files/
+
 ## 機能
 
 - 音楽ファイルのメタデータ（アーティスト・アルバム情報）を自動抽出
@@ -114,15 +117,198 @@ go build -o music-artwork-embedder
     - Redirect URI: `http://localhost` (使用しませんが必須)
     - API/SDKs: Web API にチェック
 5. 作成後、「Settings」から Client ID と Client Secret を取得
+## アーキテクチャ
+
+### 概要
+
+このプロジェクトは、単一責任の原則に基づいてパッケージ分割されたモジュラー設計を採用しています。各パッケージは明確に定義された責務を持ち、疎結合で高凝集な構造となっています。
+
+- **責務分離**: 各パッケージが特定の機能領域に特化
+- **依存性注入**: `orchestrator`パッケージが各コンポーネントを協調
+- **エラーハンドリング**: 堅牢なエラー処理とバックアップ機能
+- **拡張性**: 新しい音声フォーマットやAPIの追加が容易
+
+### ディレクトリ構造
+
+```
+.
+├── .env.local                    # 環境変数設定ファイル
+├── .gitignore                    # Git除外設定
+├── go.mod                        # Go モジュール定義
+├── go.sum                        # 依存関係チェックサム
+├── go_build.sh                   # ビルドスクリプト
+├── main.go                       # アプリケーションエントリーポイント
+├── README.md                     # プロジェクト説明書
+└── src/                          # ソースコードディレクトリ
+    ├── args/                     # コマンドライン引数処理
+    │   └── args.go
+    ├── artwork/                  # アートワーク処理
+    │   ├── ffmpeg_commands.go    # ffmpegコマンド実行
+    │   └── processor.go          # アートワーク処理ロジック
+    ├── config/                   # 設定管理
+    │   └── config.go
+    ├── fileutils/                # ファイル操作ユーティリティ
+    │   └── fileutils.go
+    ├── metadata/                 # メタデータ処理
+    │   ├── extractor.go          # メタデータ抽出
+    │   └── filename_parser.go    # ファイル名解析
+    ├── orchestrator/             # 処理統合・制御
+    │   └── orchestrator.go
+    └── spotify/                  # Spotify API連携
+        ├── client.go             # APIクライアント
+        └── types.go              # データ型定義
+```
+
+### パッケージ詳細
+
+#### `args` - コマンドライン引数処理
+- **責務**: コマンドライン引数の解析と設定管理
+- **主要構造体**: `Config`
+- **主要関数**: `ParseArgs()`
+
+#### `config` - 設定管理
+- **責務**: アプリケーション設定と環境変数の管理
+- **主要構造体**: `Config`
+- **主要関数**: `NewConfig()`, `LoadEnv()`, `ValidateSpotifyCredentials()`
+
+#### `spotify` - Spotify API連携
+- **責務**: Spotify Web APIとの通信とアートワーク検索
+- **主要構造体**: `Client`, `SpotifySearchResponse`
+- **主要関数**: `NewClient()`, `GetToken()`, `SearchArtwork()`
+
+#### `metadata` - メタデータ処理
+- **責務**: 音楽ファイルのメタデータ抽出とファイル名解析
+- **主要関数**: `ExtractMetadata()`, `ExtractTitleFromFilename()`
+
+#### `artwork` - アートワーク処理
+- **責務**: 画像ダウンロード、フォーマット検出、ffmpegによる埋め込み
+- **主要構造体**: `Processor`
+- **主要関数**: `NewProcessor()`, `DownloadImage()`, `EmbedArtwork()`, `EmbedArtworkForceReplace()`
+
+#### `fileutils` - ファイル操作ユーティリティ
+- **責務**: ファイルのバックアップ、復元、検証、ディレクトリ処理
+- **主要関数**: `CreateBackup()`, `RestoreFromBackup()`, `ValidateAudioFile()`, `ProcessDirectory()`
+
+#### `orchestrator` - 処理統合・制御
+- **責務**: 各パッケージの協調と全体的な処理フローの制御
+- **主要構造体**: `Orchestrator`
+- **主要関数**: `NewOrchestrator()`, `Initialize()`, `ProcessFile()`, `ProcessDirectory()`
+
+### クラス図（構造体関係）
+
+```mermaid
+classDiagram
+    class ArgsConfig {
+        +bool ForceOverwrite
+        +ParseArgs() (string, *Config, error)
+    }
+    
+    class ConfigConfig {
+        +bool ForceOverwrite
+        +string SpotifyClientID
+        +string SpotifyClientSecret
+        +NewConfig(bool) *Config
+        +LoadEnv() error
+        +ValidateSpotifyCredentials() error
+    }
+    
+    class SpotifyClient {
+        -string accessToken
+        -http.Client httpClient
+        +NewClient() *Client
+        +GetToken(string, string) error
+        +SearchArtwork(string, string) (string, error)
+    }
+    
+    class SpotifySearchResponse {
+        +Tracks struct
+    }
+    
+    class ArtworkProcessor {
+        -http.Client httpClient
+        +NewProcessor() *Processor
+        +DownloadImage(string, string) error
+        +GetAudioFormat(string) (string, error)
+        +HasExistingArtwork(string) (bool, error)
+        +EmbedArtwork(string, string, string) error
+        +EmbedArtworkForceReplace(string, string, string) error
+    }
+    
+    class Orchestrator {
+        -ConfigConfig config
+        -SpotifyClient spotifyClient
+        -ArtworkProcessor artworkProcessor
+        +NewOrchestrator(*Config) *Orchestrator
+        +Initialize() error
+        +ProcessFile(string) error
+        +ProcessDirectory(string) error
+    }
+    
+    Orchestrator --> ConfigConfig : uses
+    Orchestrator --> SpotifyClient : uses
+    Orchestrator --> ArtworkProcessor : uses
+    SpotifyClient --> SpotifySearchResponse : returns
+```
+
+### パッケージ依存関係図
+
+```mermaid
+graph TD
+    A[main.go] --> B[args]
+    A --> C[config]
+    A --> D[orchestrator]
+    
+    D --> C
+    D --> E[spotify]
+    D --> F[artwork]
+    D --> G[fileutils]
+    D --> H[metadata]
+    
+    E --> I[spotify/types]
+    E --> J[spotify/client]
+    
+    F --> K[artwork/processor]
+    F --> L[artwork/ffmpeg_commands]
+    
+    H --> M[metadata/extractor]
+    H --> N[metadata/filename_parser]
+    
+    style A fill:#e1f5fe
+    style D fill:#f3e5f5
+    style C fill:#e8f5e8
+    style E fill:#fff3e0
+    style F fill:#fce4ec
+    style G fill:#f1f8e9
+    style H fill:#e0f2f1
+```
 
 ## 動作の流れ
 
-1. 音楽ファイルまたはディレクトリを指定して実行
-2. 各音楽ファイルからメタデータ（アーティスト・アルバム情報）を抽出
-3. Spotify APIを使用してアートワークを検索
-4. 最高品質の画像をダウンロード
-5. ffmpegを使用して画像を音楽ファイルに埋め込み
-6. 元のファイルを上書き保存
+### 全体的な処理フロー
+
+1. **初期化**: `main.go`でコマンドライン引数を解析し、設定を読み込み
+2. **オーケストレーター作成**: 各パッケージのインスタンスを生成・注入
+3. **Spotify認証**: API認証トークンを取得
+4. **ファイル処理**: 指定されたファイル/ディレクトリを処理
+
+### 単一ファイル処理の詳細フロー
+
+1. **バックアップ作成**: `fileutils`パッケージで元ファイルをバックアップ
+2. **既存アートワーク確認**: `artwork`パッケージで既存アートワークの有無を確認
+3. **メタデータ抽出**: `metadata`パッケージでアーティスト・アルバム・タイトル情報を抽出
+4. **フォールバック処理**: メタデータ不足時にファイル名から情報を抽出
+5. **アートワーク検索**: `spotify`パッケージでSpotify APIを使用して画像を検索
+6. **画像ダウンロード**: `artwork`パッケージで最高品質の画像をダウンロード
+7. **アートワーク埋め込み**: `artwork`パッケージでffmpegを使用して画像を埋め込み
+8. **ファイル検証**: `fileutils`パッケージで出力ファイルの整合性を確認
+9. **ファイル置換**: 元ファイルを処理済みファイルで置換
+10. **クリーンアップ**: バックアップファイルと一時ファイルを削除
+
+### パッケージ間の協調
+
+- **`orchestrator`**: 全体の処理フローを制御し、各パッケージを適切な順序で呼び出し
+- **エラー処理**: 各段階でエラーが発生した場合、`fileutils`パッケージでバックアップから復元
+- **設定管理**: `config`パッケージで環境変数と実行時オプションを一元管理
 
 ## エラーハンドリング
 
@@ -170,6 +356,13 @@ Spotify認証エラー: ...
 
 ## 依存関係
 
+### 外部ライブラリ
+
 - [github.com/dhowden/tag](https://github.com/dhowden/tag) - 音楽ファイルメタデータ読み取り
+- [github.com/joho/godotenv](https://github.com/joho/godotenv) - 環境変数ファイル読み込み
 - Go標準ライブラリ
 - ffmpeg（外部依存）
+
+### 内部パッケージ依存関係
+
+内部パッケージ間の依存関係については、上記の「[パッケージ依存関係図](#パッケージ依存関係図)」を参照してください。
